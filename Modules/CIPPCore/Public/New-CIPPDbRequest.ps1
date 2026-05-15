@@ -20,7 +20,7 @@ function New-CIPPDbRequest {
     #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $false)]
         [string]$TenantFilter,
 
         [Parameter(Mandatory = $false)]
@@ -28,10 +28,22 @@ function New-CIPPDbRequest {
     )
 
     try {
+        # Enforce tenant lock when running inside custom script execution
+        if ($script:CIPPLockedTenant) {
+            $TenantFilter = $script:CIPPLockedTenant
+        }
+
+        if ([string]::IsNullOrWhiteSpace($TenantFilter)) {
+            throw 'TenantFilter is required.'
+        }
+
         $Table = Get-CippTable -tablename 'CippReportingDB'
 
         $Tenant = Get-Tenants -TenantFilter $TenantFilter | Select-Object -ExpandProperty defaultDomainName
         if (-not $Tenant) {
+            if ($TenantFilter -eq $env:TenantID) {
+                return $false
+            }
             throw "Tenant '$TenantFilter' not found"
         }
         $SafeTenantFilter = ConvertTo-CIPPODataFilterValue -Value $Tenant -Type String
