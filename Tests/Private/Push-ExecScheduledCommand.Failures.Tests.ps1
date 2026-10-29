@@ -190,8 +190,53 @@ Describe 'Push-ExecScheduledCommand outcomes' {
         Should -Invoke Write-LogMessage -Times 0 -Exactly -ParameterFilter { $Message -like 'Successfully executed task:*' }
     }
 
+    It 'keeps <Representation> recurrence terminal after <FailureStage> fails' -ForEach @(
+        @{ Representation = 'omitted'; Recurrence = $null; FailureStage = 'storage' }
+        @{ Representation = 'omitted'; Recurrence = $null; FailureStage = 'serialization' }
+        @{ Representation = 'null'; Recurrence = $null; FailureStage = 'storage' }
+        @{ Representation = 'null'; Recurrence = $null; FailureStage = 'serialization' }
+        @{ Representation = 'empty'; Recurrence = ''; FailureStage = 'storage' }
+        @{ Representation = 'empty'; Recurrence = ''; FailureStage = 'serialization' }
+        @{ Representation = 'string zero'; Recurrence = '0'; FailureStage = 'storage' }
+        @{ Representation = 'string zero'; Recurrence = '0'; FailureStage = 'serialization' }
+        @{ Representation = 'zero minutes'; Recurrence = '0m'; FailureStage = 'storage' }
+        @{ Representation = 'zero minutes'; Recurrence = '0m'; FailureStage = 'serialization' }
+        @{ Representation = 'zero hours'; Recurrence = '0h'; FailureStage = 'storage' }
+        @{ Representation = 'zero hours'; Recurrence = '0h'; FailureStage = 'serialization' }
+        @{ Representation = 'zero days'; Recurrence = '0d'; FailureStage = 'storage' }
+        @{ Representation = 'zero days'; Recurrence = '0d'; FailureStage = 'serialization' }
+    ) {
+        Mock Clear-CIPPImmutableID { 'x' * 70000 }
+        $script:PostCommandError = "synthetic $FailureStage failure"
+        if ($FailureStage -eq 'storage') {
+            Mock Add-CIPPAzDataTableEntity { throw $script:PostCommandError }
+        } else {
+            Mock ConvertTo-Json -ParameterFilter { $Depth -eq 20 } -MockWith { throw $script:PostCommandError }
+        }
+        $Item = New-SchedulerTestItem
+        if ($Representation -eq 'omitted') {
+            $Item.TaskInfo.PSObject.Properties.Remove('Recurrence')
+        } else {
+            $Item.TaskInfo.Recurrence = $Recurrence
+        }
+
+        $Result = Push-ExecScheduledCommand -Item $Item
+
+        Should -Invoke Clear-CIPPImmutableID -Times 1 -Exactly
+        $script:TaskWrites[-1].TaskState | Should -Be 'Failed'
+        $script:TaskWrites[-1].Results | Should -Be $script:PostCommandError
+        $Result | Should -Be 'Task Failed.'
+        Should -Invoke Write-LogMessage -Times 0 -Exactly -ParameterFilter { $Message -like 'Successfully executed task:*' }
+    }
+
     It 'preserves ordinary recurrence <Recurrence> after <FailureStage> fails' -ForEach @(
         @{ Recurrence = '15m'; Seconds = 900; FailureStage = 'storage' }
+        @{ Recurrence = '15m'; Seconds = 900; FailureStage = 'serialization' }
+        @{ Recurrence = '4h'; Seconds = 14400; FailureStage = 'storage' }
+        @{ Recurrence = '4h'; Seconds = 14400; FailureStage = 'serialization' }
+        @{ Recurrence = '1d'; Seconds = 86400; FailureStage = 'storage' }
+        @{ Recurrence = '1d'; Seconds = 86400; FailureStage = 'serialization' }
+        @{ Recurrence = '1'; Seconds = 86400; FailureStage = 'storage' }
         @{ Recurrence = '1'; Seconds = 86400; FailureStage = 'serialization' }
     ) {
         Mock Clear-CIPPImmutableID { 'x' * 70000 }

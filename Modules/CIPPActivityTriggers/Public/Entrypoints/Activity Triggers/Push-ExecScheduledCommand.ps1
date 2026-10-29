@@ -384,7 +384,7 @@ function Push-ExecScheduledCommand {
         }
 
         $nextRunUnixTime = [int64]$task.ScheduledTime + [int64]$secondsToAdd
-        if ($task.Recurrence -ne 0 -and $Trigger.ExecutionMode.value -ne 'once' -and $Trigger.ExecutionMode -ne 'once') {
+        if ($secondsToAdd -gt 0 -and $Trigger.ExecutionMode.value -ne 'once' -and $Trigger.ExecutionMode -ne 'once') {
             $State = 'Failed - Planned'
         } else {
             $State = 'Failed'
