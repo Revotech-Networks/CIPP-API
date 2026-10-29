@@ -227,6 +227,7 @@ function Push-ExecScheduledCommand {
         Write-Information "Failed to remove parameters: $($_.Exception.Message)"
     }
 
+    $TaskFailed = $false
     if ($IsTriggerTask -eq $true -and $Trigger.ExecutePerResource -ne $true) {
         # iterate through paramters looking for %variables% and replace them with matched data from the delta query
         # examples would be %id% to be the id of the result
@@ -277,6 +278,8 @@ function Push-ExecScheduledCommand {
                 & $Item.Command @individualCommandParameters
                 Write-Information "Results for individual execution: $($results | ConvertTo-Json -Depth 10)"
             } catch {
+                $TaskFailed = $true
+                "Task Failed: $($_.Exception.Message)"
                 Write-Information "Failed to execute command for individual matched data item: $($_.Exception.Message)"
             }
         }
@@ -295,7 +298,7 @@ function Push-ExecScheduledCommand {
                 $results = & $Item.Command @commandParameters
             } catch {
                 $results = "Task Failed: $($_.Exception.Message)"
-                $State = 'Failed'
+                $TaskFailed = $true
             }
             Write-Information 'Ran the command. Processing results'
         }
@@ -325,11 +328,14 @@ function Push-ExecScheduledCommand {
 
             if ($results -is [String]) {
                 $results = @{ Results = $results }
-            } elseif ($results -is [array] -and $results[0] -is [string] -or $results[0].resultText -is [string]) {
-                $results = $results | Where-Object { $_ -is [string] -or $_.resultText -is [string] }
+            } elseif ($results -is [array] -or $results[0].resultText -is [string]) {
                 $results = $results | ForEach-Object {
-                    $Message = $_.resultText ?? $_
-                    @{ Results = $Message }
+                    if ($_ -is [string] -or $_.resultText -is [string]) {
+                        $Message = $_.resultText ?? $_
+                        @{ Results = $Message }
+                    } else {
+                        $_
+                    }
                 }
             }
             Write-Information "Results after processing: $($results | ConvertTo-Json -Depth 10)"
@@ -378,7 +384,11 @@ function Push-ExecScheduledCommand {
         }
 
         $nextRunUnixTime = [int64]$task.ScheduledTime + [int64]$secondsToAdd
-        if ($task.Recurrence -ne 0) { $State = 'Failed - Planned' } else { $State = 'Failed' }
+        if ($secondsToAdd -gt 0 -and $Trigger.ExecutionMode.value -ne 'once' -and $Trigger.ExecutionMode -ne 'once') {
+            $State = 'Failed - Planned'
+        } else {
+            $State = 'Failed'
+        }
         Write-Information "The job is recurring, but failed. It was scheduled for $($task.ScheduledTime). The next runtime should be $nextRunUnixTime"
         if (!$IsMultiTenantExecution) {
             Update-AzDataTableEntity -Force @Table -Entity @{
@@ -390,6 +400,8 @@ function Push-ExecScheduledCommand {
             }
         }
         Write-LogMessage -API 'Scheduler_UserTasks' -tenant $Tenant -tenantid $TenantInfo.customerId -message "Failed to execute task $($task.Name): $errorMessage" -sev Error -LogData $ExceptionData
+        Remove-Variable -Name ScheduledTaskId -Scope Script -ErrorAction SilentlyContinue
+        return 'Task Failed.'
     }
 
     # For orchestrator-based commands, skip post-execution alerts as they will be handled by the orchestrator's post-execution function
@@ -412,7 +424,7 @@ function Push-ExecScheduledCommand {
         if ($Item.Command -in $OrchestratorBasedCommands) {
             Write-Information "Command $($Item.Command) is orchestrator-based. Skipping task state update - will be handled by post-execution."
             if (!$IsMultiTenantExecution) {
-                if ($State -eq 'Failed') {
+                if ($TaskFailed) {
                     # The orchestrator command itself failed to dispatch - record the failure so the task isn't lost
                     Update-AzDataTableEntity -Force @Table -Entity @{
                         PartitionKey = $task.PartitionKey
@@ -435,12 +447,12 @@ function Push-ExecScheduledCommand {
             # The PostExecution function will aggregate all results and update the parent task
             Write-Information "Multi-tenant execution for tenant $Tenant - parent task state will be updated by PostExecution"
         } elseif ($task.Recurrence -eq '0' -or [string]::IsNullOrEmpty($task.Recurrence) -or $Trigger.ExecutionMode.value -eq 'once' -or $Trigger.ExecutionMode -eq 'once') {
-            Write-Information 'Recurrence empty or 0. Task is not recurring. Setting task state to completed.'
+            Write-Information 'Recurrence empty or 0, or trigger execution mode is once. Finalizing task state.'
             Update-AzDataTableEntity -Force @Table -Entity @{
                 PartitionKey = $task.PartitionKey
                 RowKey       = $task.RowKey
                 Results      = "$StoredResults"
-                TaskState    = 'Completed'
+                TaskState    = $TaskFailed ? 'Failed' : 'Completed'
             }
         } else {
             #if recurrence is just a number, add it in days.
@@ -467,7 +479,7 @@ function Push-ExecScheduledCommand {
                 PartitionKey  = $task.PartitionKey
                 RowKey        = $task.RowKey
                 Results       = "$StoredResults"
-                TaskState     = 'Planned'
+                TaskState     = $TaskFailed ? 'Failed - Planned' : 'Planned'
                 ScheduledTime = "$nextRunUnixTime"
             }
         }
@@ -475,9 +487,12 @@ function Push-ExecScheduledCommand {
         Write-Warning "Failed to update task state: $($_.Exception.Message)"
         Write-Information $_.InvocationInfo.PositionMessage
     }
-    if ($TaskType -ne 'Alert') {
+    if ($TaskType -ne 'Alert' -and !$TaskFailed) {
         Write-LogMessage -API 'Scheduler_UserTasks' -tenant $Tenant -tenantid $TenantInfo.customerId -message "Successfully executed task: $($task.Name)" -sev Info
     }
     Remove-Variable -Name ScheduledTaskId -Scope Script -ErrorAction SilentlyContinue
+    if ($TaskFailed) {
+        return 'Task Failed.'
+    }
     return 'Task Completed Successfully.'
 }
