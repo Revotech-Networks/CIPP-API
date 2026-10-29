@@ -164,6 +164,71 @@ Describe 'Push-ExecScheduledCommand outcomes' {
         Should -Invoke Write-LogMessage -Times 0 -Exactly -ParameterFilter { $Message -like 'Successfully executed task:*' }
     }
 
+    It 'keeps a fired once trigger terminal after <FailureStage> fails (<ModeShape>)' -ForEach @(
+        @{ FailureStage = 'storage'; ModeShape = 'string'; ExecutionMode = 'once' }
+        @{ FailureStage = 'storage'; ModeShape = 'value object'; ExecutionMode = @{ value = 'once' } }
+        @{ FailureStage = 'serialization'; ModeShape = 'string'; ExecutionMode = 'once' }
+        @{ FailureStage = 'serialization'; ModeShape = 'value object'; ExecutionMode = @{ value = 'once' } }
+    ) {
+        Mock Clear-CIPPImmutableID { 'x' * 70000 }
+        $script:PostCommandError = "synthetic $FailureStage failure"
+        if ($FailureStage -eq 'storage') {
+            Mock Add-CIPPAzDataTableEntity { throw $script:PostCommandError }
+        } else {
+            Mock ConvertTo-Json -ParameterFilter { $Depth -eq 20 } -MockWith { throw $script:PostCommandError }
+        }
+        $Item = New-SchedulerTestItem -Recurrence '15m' -PerResource
+        $Item.TaskInfo.Trigger = @{ Type = 'DeltaQuery'; ExecutePerResource = $true; ExecutionMode = $ExecutionMode } |
+            ConvertTo-Json -Compress -Depth 10
+
+        $Result = Push-ExecScheduledCommand -Item $Item
+
+        Should -Invoke Clear-CIPPImmutableID -Times 2 -Exactly
+        $script:TaskWrites[-1].TaskState | Should -Be 'Failed'
+        $script:TaskWrites[-1].Results | Should -Be $script:PostCommandError
+        $Result | Should -Be 'Task Failed.'
+        Should -Invoke Write-LogMessage -Times 0 -Exactly -ParameterFilter { $Message -like 'Successfully executed task:*' }
+    }
+
+    It 'preserves ordinary recurrence <Recurrence> after <FailureStage> fails' -ForEach @(
+        @{ Recurrence = '15m'; Seconds = 900; FailureStage = 'storage' }
+        @{ Recurrence = '1'; Seconds = 86400; FailureStage = 'serialization' }
+    ) {
+        Mock Clear-CIPPImmutableID { 'x' * 70000 }
+        $script:PostCommandError = "synthetic $FailureStage failure"
+        if ($FailureStage -eq 'storage') {
+            Mock Add-CIPPAzDataTableEntity { throw $script:PostCommandError }
+        } else {
+            Mock ConvertTo-Json -ParameterFilter { $Depth -eq 20 } -MockWith { throw $script:PostCommandError }
+        }
+        $Item = New-SchedulerTestItem -Recurrence $Recurrence
+
+        $Result = Push-ExecScheduledCommand -Item $Item
+
+        Should -Invoke Clear-CIPPImmutableID -Times 1 -Exactly
+        $script:TaskWrites[-1].TaskState | Should -Be 'Failed - Planned'
+        [int64]$script:TaskWrites[-1].ScheduledTime | Should -Be ([int64]$Item.TaskInfo.ScheduledTime + $Seconds)
+        $script:TaskWrites[-1].Results | Should -Be $script:PostCommandError
+        $Result | Should -Be 'Task Failed.'
+    }
+
+    It 'keeps a once trigger scheduled when delta lookup fails before execution (<ModeShape>)' -ForEach @(
+        @{ ModeShape = 'string'; ExecutionMode = 'once' }
+        @{ ModeShape = 'value object'; ExecutionMode = @{ value = 'once' } }
+    ) {
+        Mock Get-DeltaQueryUrl { throw 'synthetic delta lookup failure' }
+        $Item = New-SchedulerTestItem -Recurrence '15m' -PerResource
+        $Item.TaskInfo.Trigger = @{ Type = 'DeltaQuery'; ExecutePerResource = $true; ExecutionMode = $ExecutionMode } |
+            ConvertTo-Json -Compress -Depth 10
+
+        Push-ExecScheduledCommand -Item $Item | Should -BeNullOrEmpty
+
+        Should -Invoke Clear-CIPPImmutableID -Times 0 -Exactly
+        $script:TaskWrites[-1].TaskState | Should -Be 'Failed - Planned'
+        [int64]$script:TaskWrites[-1].ScheduledTime | Should -Be ([int64]$Item.TaskInfo.ScheduledTime + 900)
+        $script:TaskWrites[-1].Results | Should -Be 'synthetic delta lookup failure'
+    }
+
     It 'preserves ordinary success with recurrence <Recurrence>' -ForEach @(
         @{ Recurrence = '0'; ExpectedState = 'Completed' }
         @{ Recurrence = '15m'; ExpectedState = 'Planned' }

@@ -384,7 +384,11 @@ function Push-ExecScheduledCommand {
         }
 
         $nextRunUnixTime = [int64]$task.ScheduledTime + [int64]$secondsToAdd
-        if ($task.Recurrence -ne 0) { $State = 'Failed - Planned' } else { $State = 'Failed' }
+        if ($task.Recurrence -ne 0 -and $Trigger.ExecutionMode.value -ne 'once' -and $Trigger.ExecutionMode -ne 'once') {
+            $State = 'Failed - Planned'
+        } else {
+            $State = 'Failed'
+        }
         Write-Information "The job is recurring, but failed. It was scheduled for $($task.ScheduledTime). The next runtime should be $nextRunUnixTime"
         if (!$IsMultiTenantExecution) {
             Update-AzDataTableEntity -Force @Table -Entity @{
