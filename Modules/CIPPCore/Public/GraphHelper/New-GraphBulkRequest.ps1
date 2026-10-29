@@ -88,7 +88,23 @@ function New-GraphBulkRequest {
                         $NextReturn = Invoke-CIPPRestMethod -Uri $URL -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $NextReqBody
                     }
 
-                    foreach ($NextResponse in $NextReturn.responses) {
+                    if ($NextReturn.responses -isnot [System.Collections.IList] -or $NextReturn.responses.Count -ne $NextBatchRequests.Count) {
+                        throw "Graph pagination request '$($NextBatchRequests.id -join ', ')' returned an invalid response batch."
+                    }
+
+                    foreach ($NextRequest in $NextBatchRequests) {
+                        $MatchingResponses = @($NextReturn.responses | Where-Object { $_.id -eq $NextRequest.id })
+                        if ($MatchingResponses.Count -ne 1) {
+                            throw "Graph pagination request '$($NextRequest.id)' returned a missing or duplicate response."
+                        }
+                        $NextResponse = $MatchingResponses[0]
+                        if ($NextResponse.status -ne 200 -or $NextResponse.body.error) {
+                            throw "Graph pagination request '$($NextRequest.id)' failed with status '$($NextResponse.status)': $($NextResponse.body.error.code) $($NextResponse.body.error.message)"
+                        }
+                        if ($NextResponse.body.value -isnot [System.Collections.IList]) {
+                            throw "Graph pagination request '$($NextRequest.id)' returned an invalid collection."
+                        }
+
                         if ($NextResponse.body.value) {
                             $NewValues = [System.Collections.Generic.List[PSCustomObject]]$MoreData.body.value
                             foreach ($val in $NextResponse.body.value) { $NewValues.Add($val) }
